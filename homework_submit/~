@@ -1,0 +1,88 @@
+import sys
+import os
+import cv2
+import numpy as np
+from ctypes import *
+import time
+
+sys.path.append(os.path.join(os.path.dirname(__file__), 'MvImport'))
+from MvCameraControl_class import *
+from CameraParams_header import *
+
+os.environ['MVCAM_COMMON_RUNENV'] = '/opt/MVS/lib'
+os.environ['LD_LIBRARY_PATH'] = '/opt/MVS/lib/64:' + os.environ.get('LD_LIBRARY_PATH', '')
+
+def main():
+    cam = MvCamera()
+    try:
+        # 1. 正常连接相机
+        print("[INFO] 正在初始化相机...")
+        deviceList = MV_CC_DEVICE_INFO_LIST()
+        MvCamera.MV_CC_EnumDevices(MV_USB_DEVICE, deviceList)
+        if deviceList.nDeviceNum == 0:
+            raise Exception("未找到相机")
+            
+        stDeviceList = cast(deviceList.pDeviceInfo[0], POINTER(MV_CC_DEVICE_INFO)).contents
+        cam.MV_CC_CreateHandle(stDeviceList)
+        cam.MV_CC_OpenDevice(MV_ACCESS_Exclusive, 0)
+        
+        stParam = MVCC_INTVALUE_EX()
+        cam.MV_CC_GetIntValueEx("PayloadSize", stParam)
+        nPayloadSize = stParam.nCurValue
+        cam.MV_CC_StartGrabbing()
+        
+        print("[INFO] 相机连接成功，开始取流。准备模拟异常...")
+        
+        data_buf = (c_ubyte * nPayloadSize)()
+        stFrameInfo = MV_FRAME_OUT_INFO_EX()
+
+        # 先正常抓一帧
+        ret = cam.MV_CC_GetOneFrameTimeout(data_buf, nPayloadSize, stFrameInfo, 1000)
+        if ret == 0:
+            print("[SUCCESS] 正常获取一帧图像。")
+            
+        # 2. 模拟异常 1：不支持的格式
+        print("\n[TEST] 模拟异常：收到不支持的图像格式...")
+        try:
+            # 故意传入一个乱码格式进行转换
+            fake_image = np.zeros((100, 100), dtype=np.uint8)
+            cv2.cvtColor(fake_image, 9999) # 9999 是无效的转换代码，必定报错
+        except Exception as e:
+            print(f"[EXCEPTION CAUGHT] 捕获到格式错误异常: {e}")
+            
+        # 模拟异常 2：取流超时 (将超时时间设为 1ms，由于曝光是 1000us，大概率会超时)
+        print("\n[TEST] 模拟异常：相机取流超时...")
+        ret = cam.MV_CC_GetOneFrameTimeout(data_buf, nPayloadSize, stFrameInfo, 1)
+        if ret != 0:
+            print(f"[EXCEPTION CAUGHT] 取流超时！错误码: {hex(ret)} (0x80000007 通常是超时)")
+
+        # 模拟异常 3：强行拔掉相机的物理模拟 (这里用代码触发一个读取假数据)
+        print("\n[TEST] 模拟异常：相机突然断连...")
+        try:
+            # 模拟读取空内存
+            null_buf = None
+            null_buf.reshape((100, 100)) 
+        except Exception as e:
+            print(f"[EXCEPTION CAUGHT] 捕获到内存/设备错误异常: {e}")
+
+    except Exception as global_e:
+        print(f"\n[FATAL ERROR] 程序遇到致命错误: {global_e}")
+        
+    finally:
+        # 3. 核心要求：无论发生什么异常，必须在这里释放资源！
+        print("\n[CLEANUP] 正在执行资源释放流程...")
+        try:
+            cam.MV_CC_StopGrabbing()
+            print("[CLEANUP] 停止取流完成。")
+            cam.MV_CC_CloseDevice()
+            print("[CLEANUP] 关闭设备完成。")
+            cam.MV_CC_DestroyHandle()
+            print("[CLEANUP] 销毁句柄完成。")
+            cv2.destroyAllWindows()
+            print("[CLEANUP] 资源全部安全释放，程序优雅退出。")
+        except Exception as clean_e:
+            print(f"[CLEANUP ERROR] 释放资源时出错: {clean_e}")
+
+if __name__ == "__main__":
+    main()
+
